@@ -44,7 +44,7 @@ local function removeElements()
 end
 
 local function getPaid()
-    TriggerServerEvent("qbx_truckerjob:server:getPaid")
+    TriggerServerEvent('qbx_truckerjob:server:getPaid')
 
     if DoesBlipExist(currentBlip) then
         RemoveBlip(currentBlip)
@@ -90,7 +90,7 @@ local function openMenuGarage()
 
     lib.registerContext({
         id = 'trucker_veh_menu',
-        title = locale("menu.header"),
+        title = locale('menu.header'),
         options = truckMenu
     })
 
@@ -399,7 +399,7 @@ local function createElement(location, sprinteId)
     SetBlipScale(element, 0.6)
     SetBlipAsShortRange(element, true)
     SetBlipColour(element, 5)
-    BeginTextCommandSetBlipName("STRING")
+    BeginTextCommandSetBlipName('STRING')
     AddTextComponentSubstringPlayerName(location.label)
     EndTextCommandSetBlipName(element)
 
