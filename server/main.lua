@@ -23,7 +23,7 @@ local function getPlayer(source)
     local player = exports.qbx_core:GetPlayer(source)
     if not player then return end
 
-    if player.PlayerData.job.name ~= "trucker" then
+    if player.PlayerData.job.name ~= 'trucker' then
         return DropPlayer(source, locale('exploit_attempt'))
     end
 
@@ -50,10 +50,10 @@ RegisterNetEvent('qbx_truckerjob:server:returnVehicle', function ()
     local citizenid = player.PlayerData.citizenid
 
     if bail[citizenid] then
-        player.Functions.AddMoney('cash', bail[citizenid], "trucker-bail-paid")
+        player.Functions.AddMoney('cash', bail[citizenid], 'trucker-bail-paid')
         bail[citizenid] = nil
 
-        notify(player, locale("success.refund_to_cash", config.bailPrice), "success")
+        notify(player, locale('success.refund_to_cash', config.bailPrice), 'success')
     end
 end)
 
@@ -66,21 +66,21 @@ RegisterNetEvent('qbx_truckerjob:server:doBail', function(veh)
 
     turnAntiSpawnAbuseOn(citizenid)
     if antiAbuse[citizenid] then
-        return notify(player, locale("error.too_many_rents", config.bailPrice), "error")
+        return notify(player, locale('error.too_many_rents', config.bailPrice), 'error')
     end
 
     local money = player.PlayerData.money
 
     if money.cash < config.bailPrice then
         if money.bank < config.bailPrice then
-            return notify(player, locale("error.no_deposit", config.bailPrice), "error")
+            return notify(player, locale('error.no_deposit', config.bailPrice), 'error')
         end
 
-        player.Functions.RemoveMoney('bank', config.bailPrice, "tow-received-bail")
-        notify(player, locale("success.paid_with_bank", config.bailPrice), "success")
+        player.Functions.RemoveMoney('bank', config.bailPrice, 'tow-received-bail')
+        notify(player, locale('success.paid_with_bank', config.bailPrice), 'success')
     else
-        player.Functions.RemoveMoney('cash', config.bailPrice, "tow-received-bail")
-        notify(player, locale("success.paid_with_cash", config.bailPrice), "success")
+        player.Functions.RemoveMoney('cash', config.bailPrice, 'tow-received-bail')
+        notify(player, locale('success.paid_with_cash', config.bailPrice), 'success')
     end
 
     bail[citizenid] = config.bailPrice
@@ -118,8 +118,8 @@ RegisterNetEvent('qbx_truckerjob:server:getPaid', function()
     player.Functions.AddJobReputation(playerDrops)
     drops[citizenid] = nil
 
-    player.Functions.AddMoney("bank", payment, "trucker-salary")
-    notify(player, locale("success.you_earned", payment), "success")
+    player.Functions.AddMoney('bank', payment, 'trucker-salary')
+    notify(player, locale('success.you_earned', payment), 'success')
 end)
 
 lib.callback.register('qbx_truckerjob:server:spawnVehicle', function(source, model)
@@ -129,7 +129,7 @@ lib.callback.register('qbx_truckerjob:server:spawnVehicle', function(source, mod
 
     local vehicleLocation = sharedConfig.locations.vehicle
 
-    local plate = "TRUK" .. lib.string.random('1111')
+    local plate = 'TRUK' .. lib.string.random('1111')
     local netId, veh = qbx.spawnVehicle({
         model = model,
         spawnSource = vec4(vehicleLocation.coords.x, vehicleLocation.coords.y, vehicleLocation.coords.z, vehicleLocation.rotation),
@@ -150,7 +150,7 @@ lib.callback.register('qbx_truckerjob:server:spawnVehicle', function(source, mod
     return netId, plate
 end)
 
-AddEventHandler("playerDropped", function (source)
+AddEventHandler('playerDropped', function (source)
     locations[source] = nil
 end)
 
@@ -171,7 +171,7 @@ end
 --- param player any `Player`
 -- local function giveReward(player)
 --     if math.random() < 0.74 then
---         player.Functions.AddItem("cryptostick", 1, false)
+--         player.Functions.AddItem('cryptostick', 1, false)
 --     end
 -- end
 
