@@ -1,228 +1,357 @@
 local config = require 'config.server'
 local sharedConfig = require 'config.shared'
---- drops is the counter of packages for which payment is due
-local bail, drops, locations, antiAbuse = {}, {}, {}, {}
+local storedRoutes = {}
+local queue = {}
+local spawnedTrailers = {}
+local handlingPayments = {}
 
----@alias NotificationPosition 'top' | 'top-right' | 'top-left' | 'bottom' | 'bottom-right' | 'bottom-left' | 'center-right' | 'center-left'
----@alias NotificationType 'info' | 'warning' | 'success' | 'error'
-
----Text box popup for player which dissappears after a set time.
----@param text table|string text of the notification
----@param notifyType? NotificationType informs default styling. Defaults to 'inform'
----@param duration? integer milliseconds notification will remain on screen. Defaults to 5000
----@param subTitle? string extra text under the title
----@param notifyPosition? NotificationPosition
----@param notifyStyle? table Custom styling. Please refer too https://overextended.dev/ox_lib/Modules/Interface/Client/notify#libnotify
----@param notifyIcon? string Font Awesome 6 icon name
----@param notifyIconColor? string Custom color for the icon chosen before
-local function notify(player, text, notifyType, duration, subTitle, notifyPosition, notifyStyle, notifyIcon, notifyIconColor)
-    return exports.qbx_core:Notify(player.PlayerData.source, text, notifyType, duration, subTitle, notifyPosition, notifyStyle, notifyIcon, notifyIconColor)
+local function GetPlayer(id)
+    return exports.qbx_core:GetPlayer(id)
 end
 
-local function getPlayer(source)
-    local player = exports.qbx_core:GetPlayer(source)
-    if not player then return end
-
-    if player.PlayerData.job.name ~= 'trucker' then
-        return DropPlayer(source, locale('exploit_attempt'))
-    end
-
-    return player
+local function GetPlyIdentifier(Player)
+    return Player.PlayerData.citizenid
 end
 
---- toggle anti spawn abuse flag
---- @param citizenid number
-local function turnAntiSpawnAbuseOn(citizenid)
-    CreateThread(function()
-        if not antiAbuse[citizenid] then
-            antiAbuse[citizenid] = true
-            Wait(config.spawnBreakTime)
-            antiAbuse[citizenid] = nil
+local function GetSourceFromIdentifier(cid)
+    local Player = exports.qbx_core:GetPlayerByCitizenId(cid)
+    return Player and Player.PlayerData.source or false
+end
+
+local function GetCharacterName(Player)
+    return Player.PlayerData.charinfo.firstname.. ' ' ..Player.PlayerData.charinfo.lastname
+end
+
+local function AddItem(Player, item, amount)
+    exports.ox_inventory:AddItem(Player.PlayerData.source, item, amount)
+end
+
+local function RemoveItem(Player, item, amount)
+    exports.ox_inventory:RemoveItem(Player.PlayerData.source, item, amount)
+end
+
+local function AddMoney(Player, moneyType, amount)
+    Player.Functions.AddMoney(moneyType, amount)
+end
+
+local function removeFromQueue(cid)
+    for i, cids in ipairs(queue) do
+        if cids == cid then
+            table.remove(queue, i)
+            break
         end
-    end)
+    end
 end
 
-RegisterNetEvent('qbx_truckerjob:server:returnVehicle', function ()
-    local player = getPlayer(source)
+local function createTruckingVehicle(source, model, warp, coords)
+    if not coords then coords = sharedConfig.VehicleSpawn end
 
-    if not player then return end
+    -- CreateVehicleServerSetter can be funky and I cba, especially for a temp vehicle. Cry about it. I just need the entity handle.
+    local vehicle = CreateVehicle(joaat(model), coords.x, coords.y, coords.z, coords.w, true, true)
+    local ped = GetPlayerPed(source)
 
-    local citizenid = player.PlayerData.citizenid
+    while not DoesEntityExist(vehicle) do Wait(0) end 
 
-    if bail[citizenid] then
-        player.Functions.AddMoney('cash', bail[citizenid], 'trucker-bail-paid')
-        bail[citizenid] = nil
-
-        notify(player, locale('success.refund_to_cash', config.bailPrice), 'success')
-    end
-end)
-
-RegisterNetEvent('qbx_truckerjob:server:doBail', function(veh)
-    local player = getPlayer(source)
-
-    if not player then return end
-
-    local citizenid = player.PlayerData.citizenid
-
-    turnAntiSpawnAbuseOn(citizenid)
-    if antiAbuse[citizenid] then
-        return notify(player, locale('error.too_many_rents', config.bailPrice), 'error')
-    end
-
-    local money = player.PlayerData.money
-
-    if money.cash < config.bailPrice then
-        if money.bank < config.bailPrice then
-            return notify(player, locale('error.no_deposit', config.bailPrice), 'error')
+    if warp then
+        while GetVehiclePedIsIn(ped, false) ~= vehicle do
+            TaskWarpPedIntoVehicle(ped, vehicle, -1)
+            Wait(100)
         end
-
-        player.Functions.RemoveMoney('bank', config.bailPrice, 'tow-received-bail')
-        notify(player, locale('success.paid_with_bank', config.bailPrice), 'success')
-    else
-        player.Functions.RemoveMoney('cash', config.bailPrice, 'tow-received-bail')
-        notify(player, locale('success.paid_with_cash', config.bailPrice), 'success')
     end
 
-    bail[citizenid] = config.bailPrice
-    TriggerClientEvent('qbx_truckerjob:client:spawnVehicle', player.PlayerData.source, veh)
-end)
-
-RegisterNetEvent('qbx_truckerjob:server:getPaid', function()
-    local player = getPlayer(source)
-
-    if not player then return end
-
-    local citizenid = player.PlayerData.citizenid
-
-    local playerDrops = drops[citizenid] or 0
-
-    if playerDrops == 0 then
-        return notify(player, locale('error.no_work_done'), 'error')
-    end
-
-    local dropPrice, bonus = math.random(100, 120), 0
-
-    if playerDrops >= 5 then
-        bonus = math.ceil((dropPrice / 10) * 5) + 100
-    elseif playerDrops >= 10 then
-        bonus = math.ceil((dropPrice / 10) * 7) + 300
-    elseif playerDrops >= 15 then
-        bonus = math.ceil((dropPrice / 10) * 10) + 400
-    elseif playerDrops >= 20 then
-        bonus = math.ceil((dropPrice / 10) * 12) + 500
-    end
-
-    local price = (dropPrice * playerDrops) + bonus
-    local taxAmount = math.ceil((price / 100) * config.paymentTax)
-    local payment = price - taxAmount
-    player.Functions.AddJobReputation(playerDrops)
-    drops[citizenid] = nil
-
-    player.Functions.AddMoney('bank', payment, 'trucker-salary')
-    notify(player, locale('success.you_earned', payment), 'success')
-end)
-
-lib.callback.register('qbx_truckerjob:server:spawnVehicle', function(source, model)
-    local player = getPlayer(source)
-
-    if not player then return end
-
-    local vehicleLocation = sharedConfig.locations.vehicle
-
-    local plate = 'TRUK' .. lib.string.random('1111')
-    local netId, veh = qbx.spawnVehicle({
-        model = model,
-        spawnSource = vec4(vehicleLocation.coords.x, vehicleLocation.coords.y, vehicleLocation.coords.z, vehicleLocation.rotation),
-        warp = GetPlayerPed(source),
-        props = {
-            plate = plate,
-            modLivery = 1,
-            color1 = 122,
-            color2 = 122,
-        }
-    })
-
-    if not netId or netId == 0 then return end
-    if not veh or veh == 0 then return end
-
-    lib.print.debug('spawn vehicle with plate: ', GetVehicleNumberPlateText(veh))
-    TriggerClientEvent('vehiclekeys:client:SetOwner', source, plate)
-    return netId, plate
-end)
-
-AddEventHandler('playerDropped', function (source)
-    locations[source] = nil
-end)
-
---- Checks if location is in done table
---- @param doneLocations table
---- @param current number
---- @return boolean? `true` when location is not in the table, nil otherwise
-local function isNotLocationDone(doneLocations, current)
-    for _, location in ipairs(doneLocations) do
-        if location == current then return end
-    end
-
-    return true
+    return vehicle
 end
 
---- deprecated in the current version, cryptosticks have no value
---- gives cryptostick
---- param player any `Player`
--- local function giveReward(player)
---     if math.random() < 0.74 then
---         player.Functions.AddItem('cryptostick', 1, false)
---     end
--- end
+local function resetEverything()
+    local players = GetPlayers()
+    if #players > 0 then
+        for i = 1, #players do
+            local src = tonumber(players[i])
+            local player = GetPlayer(src)
 
---- selection of a new delivery destination
---- @param source number player id
---- @param init boolean
---- @return integer? `shop index` if any route to do, 0 otherwise
---- @return integer boxes per location
-lib.callback.register('qbx_truckerjob:server:getNewTask', function(source, init)
-    local player = getPlayer(source)
-    if not player then return nil, 0 end
+            if player then
+                if Player(src).state.truckDuty then
+                    Player(src).state:set('truckDuty', false, true)
+                end
+                local cid = GetPlyIdentifier(player)
+                if storedRoutes[cid] and storedRoutes[cid].vehicle and DoesEntityExist(storedRoutes[cid].vehicle) then
+                    DeleteEntity(storedRoutes[cid].vehicle)
+                end
+            end
 
-    local citizenid = player.PlayerData.citizenid
-
-    if init then
-        local randPositionIndex = math.random(#sharedConfig.locations.stores)
-        locations[source] = { done = {}, current = randPositionIndex }
-
-        return randPositionIndex, math.random(config.drops.min, config.drops.max)
-    end
-
-    drops[citizenid] = (drops[citizenid] or 0) + 1
-
-    local doneLocations = locations[source].done
-    locations[source].done[#doneLocations + 1] = locations[source].current
-    if #doneLocations == config.maxLocations then
-        locations[source].current = nil
-        return 0, 0
-    end
-
-    -- giveReward(player)
-
-    local index = 0
-    local minDist = 0
-    local stores = sharedConfig.locations.stores
-
-    local currentCoords = sharedConfig.locations.stores[locations[source].current].coords.xyz
-
-    for i = 1, #stores do
-        local store = stores[i]
-        if isNotLocationDone(locations[source].done, i) then
-            local storeLocation = store.coords.xyz
-            local distance = #(currentCoords - storeLocation)
-            if minDist == 0 or (distance ~= 0 and distance < minDist) then
-                index = i
-                minDist = distance
+            if spawnedTrailers[src] and DoesEntityExist(spawnedTrailers[src]) then
+                DeleteEntity(spawnedTrailers[src])
             end
         end
     end
+end
 
-    locations[source].current = index
+local function generateRoute(cid)
+    local data = {}
+    data.pickup = config.Pickups[math.random(#config.Pickups)] 
+    repeat
+        data.deliver = config.Deliveries[math.random(#config.Deliveries)]
 
-    return index, math.random(config.drops.min, config.drops.max)
+        local found = false
+        for _, route in ipairs(storedRoutes[cid].routes) do
+            if route.deliver == data.deliver then
+                found = true
+                break
+            end
+        end
+
+        if not found then break end
+    until false
+
+    data.payment = math.ceil(#(data.deliver.xyz - data.pickup.xyz) * config.PaymentMultiplier)
+
+
+
+    return data
+end
+
+lib.callback.register('qbx_truckerjob:server:clockIn', function(source)
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if storedRoutes[cid] then
+        exports.qbx_core:Notify(src, locale('error.already_request'), 'error', 7500)
+        return false
+    end
+
+    queue[#queue+1] = cid
+    storedRoutes[cid] = { routes = {}, vehicle = 0, }
+    Player(src).state:set('truckDuty', true, true)
+
+    exports.qbx_core:Notify(src, locale('success.check_routes'), 'success', 7000)
+    return true
 end)
+
+lib.callback.register('qbx_truckerjob:server:clockOut', function(source) 
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if not storedRoutes[cid] or not Player(src).state.truckDuty then
+        exports.qbx_core:Notify(src, locale('error.not_request'), 'error', 7500)
+        return false
+    end
+
+    local workTruck = storedRoutes[cid].vehicle
+    local workTrailer = spawnedTrailers[src]
+
+    if workTruck and DoesEntityExist(workTruck) then DeleteEntity(workTruck) end
+    if workTrailer and DoesEntityExist(workTrailer) then DeleteEntity(workTrailer) end
+
+    removeFromQueue(cid)
+    storedRoutes[cid] = nil
+    Player(src).state:set('truckDuty', false, true)
+    TriggerClientEvent('qbx_truckerjob:client:clearRoutes', src)
+    exports.qbx_core:Notify(src, locale('success.clear_routes'), 'success', 7500)
+    return true
+end)
+
+lib.callback.register('qbx_truckerjob:server:spawnTruck', function(source) 
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if not storedRoutes[cid] or not Player(src).state.truckDuty then
+        exports.qbx_core:Notify(src, locale('error.not_request'), 'error', 7500)
+        return false
+    end
+
+    local workTruck = storedRoutes[cid].vehicle
+
+    if DoesEntityExist(workTruck) then
+        local coords = GetEntityCoords(workTruck)
+        return false, coords, NetworkGetNetworkIdFromEntity(workTruck)
+    end
+
+    local model = config.Trucks[math.random(#config.Trucks)]
+    local vehicle = createTruckingVehicle(src, model, true)
+
+    storedRoutes[cid].vehicle = vehicle
+    exports.qbx_core:Notify(src, locale('success.pull_out_truck'), 'success', 7500)
+    TriggerClientEvent('qbx_truckerjob:server:spawnTruck', src, NetworkGetNetworkIdFromEntity(vehicle))
+    return true
+end)
+
+lib.callback.register('qbx_truckerjob:server:spawnTrailer', function(source) 
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if not storedRoutes[cid] or not Player(src).state.truckDuty then return false end
+
+    local model = config.Trailers[math.random(#config.Trailers)]
+    local coords = storedRoutes[cid].currentRoute.pickup
+    local trailer = createTruckingVehicle(src, model, false, coords)
+
+    spawnedTrailers[src] = trailer
+    return true, NetworkGetNetworkIdFromEntity(trailer)
+end)
+
+lib.callback.register('qbx_truckerjob:server:chooseRoute', function(source, index) 
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if not storedRoutes[cid] or not Player(src).state.truckDuty then return false end
+
+    if spawnedTrailers[src] or storedRoutes[cid].currentRoute then
+        exports.qbx_core:Notify(src, locale('success.active_routes'), 'success')
+        return false 
+    end
+
+    storedRoutes[cid].currentRoute = storedRoutes[cid].routes[index]
+    storedRoutes[cid].currentRoute.index = index
+
+    return storedRoutes[cid].currentRoute
+end)
+
+lib.callback.register('qbx_truckerjob:server:getRoutes', function(source) 
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if not storedRoutes[cid] or not Player(src).state.truckDuty then return false end
+
+    return storedRoutes[cid].routes
+end)
+
+lib.callback.register('qbx_truckerjob:server:updateRoute', function(source, netid, route)
+    if handlingPayments[source] then return false end
+    handlingPayments[source] = true
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+    local pos = GetEntityCoords(GetPlayerPed(src))
+    local entity = NetworkGetEntityFromNetworkId(netid)
+    local coords = GetEntityCoords(entity)
+    local data = storedRoutes[cid]
+
+    if not data or not DoesEntityExist(entity) or #(coords - data.currentRoute.deliver.xyz) > 15.0 or #(pos - data.currentRoute.deliver.xyz) > 15.0 then
+        handlingPayments[src] = nil
+        return false 
+    end
+    
+    if spawnedTrailers[src] == entity and route.index == data.currentRoute.index then
+        local payout = data.currentRoute.payment
+        DeleteEntity(entity)
+        spawnedTrailers[src] = nil
+        data.currentRoute = nil
+        table.remove(data.routes, route.index)
+        AddMoney(player, 'cash', payout)
+        exports.qbx_core:Notify(src, (locale('success.finish_route')):format(payout), 'success', 7000)
+        SetTimeout(2000, function()
+            handlingPayments[src] = nil
+        end)
+    end
+end)
+
+lib.callback.register('qbx_truckerjob:server:abortRoute', function(source, index)
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+
+    if not storedRoutes[cid] or not Player(src).state.truckDuty then return false end
+
+    local data = storedRoutes[cid]
+
+    if data.currentRoute and data.currentRoute.index == index then
+        if spawnedTrailers[src] and DoesEntityExist(spawnedTrailers[src]) then
+            DeleteEntity(spawnedTrailers[src])
+            spawnedTrailers[src] = nil
+        end
+        data.currentRoute = nil
+        table.remove(data.routes, index)
+        TriggerClientEvent('qbx_truckerjob:client:clearRoutes', src)
+        return true
+    end
+
+    return false
+end)
+
+lib.callback.register('qbx_truckerjob:server:rentvehicle', function(source)
+    local src = source
+    local player = GetPlayer(src)
+    if not player then return end
+    local money = player.PlayerData.money
+    if money.cash < config.RentPrice then
+        if money.bank < config.RentPrice then
+            exports.qbx_core:Notify(src, locale('error.no_deposit', config.RentPrice), 'error')
+            return false
+        end
+        player.Functions.RemoveMoney('bank', config.RentPrice, 'Rental Vehicle')
+        exports.qbx_core:Notify(src, locale('success.paid_with_bank', config.RentPrice), 'success')
+        return true
+    else
+        player.Functions.RemoveMoney('cash', config.RentPrice, 'Rental Vehicle')
+        exports.qbx_core:Notify(src, locale('success.paid_with_cash', config.RentPrice), 'success')
+        return true
+    end
+end)
+
+lib.callback.register('qbx_truckerjob:server:returnrentvehicle', function()
+    local src = source
+    local player = GetPlayer(src)
+    if not player then return end
+    player.Functions.RemoveMoney('cash', config.RentPrice * (config.ReturnRentPercentage/100), 'Rental Vehicle')
+    exports.qbx_core:Notify(src, locale('success.refund_to_cash', math.abs(config.RentPrice * (config.ReturnRentPercentage/100))), 'success')
+    return true
+end)
+
+AddEventHandler('onResourceStop', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+    resetEverything()
+end)
+
+AddEventHandler('playerDropped', function()
+    local src = source
+    if Player(src).state.truckDuty then
+        Player(src).state:set('truckDuty', false, true)
+        if spawnedTrailers[src] and DoesEntityExist(spawnedTrailers[src]) then
+            DeleteEntity(spawnedTrailers[src])
+        end
+    end
+end)
+
+RegisterNetEvent('QBCore:Server:OnPlayerUnload', function(source)
+    local src = source
+    if Player(src).state.truckDuty then
+        Player(src).state:set('truckDuty', false, true)
+        if spawnedTrailers[src] and DoesEntityExist(spawnedTrailers[src]) then
+            DeleteEntity(spawnedTrailers[src])
+        end
+    end
+end)
+
+RegisterNetEvent('QBCore:Server:OnPlayerLoaded', function()
+    local src = source
+    local player = GetPlayer(src)
+    local cid = GetPlyIdentifier(player)
+    
+    if storedRoutes[cid] then
+        Player(src).state:set('truckDuty', true, true)
+    end
+end)
+
+local function initQueue()
+    if #queue == 0 then return end
+
+    for i = 1, #queue do
+        local cid = queue[i]
+        local src = GetSourceFromIdentifier(cid)
+        local player = GetPlayer(src)
+        if player and Player(src).state.truckDuty then
+            if #storedRoutes[cid].routes < 5 then
+                storedRoutes[cid].routes[#storedRoutes[cid].routes + 1] = generateRoute(cid)
+                exports.qbx_core:Notify(src, locale('success.new_route'), 'success', 7500)
+            end
+        end
+    end
+end
+
+SetInterval(initQueue, config.QueueTimer * 60000)
